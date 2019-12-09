@@ -24,7 +24,7 @@ def parse_medium_filename(filename):
     return uuid, slug, date, status
 
 
-def convert_medium_post_to_ghost_json(html_filename, post_html_content):
+def convert_medium_post_to_ghost_json(export_folder, html_filename, post_html_content):
     """
     Convert a Medium HTML export file's content into a Mobiledoc document.
     :param html_filename: The original filename from Medium (needed to grab publish state)
@@ -35,7 +35,7 @@ def convert_medium_post_to_ghost_json(html_filename, post_html_content):
 
     # Get the publish date and slug from the exported filename
     _, filename = html_filename.split("/")
-    uuid, slug, date, status = parse_medium_filename(filename)
+    uuid, slug_from_filename, date, status = parse_medium_filename(filename)
 
     # Extract post-level metadata elements that will be at known elements
     soup = BeautifulSoup(post_html_content, 'html.parser')
@@ -45,13 +45,25 @@ def convert_medium_post_to_ghost_json(html_filename, post_html_content):
     if not title:
         title = "Empty title"
     # - Subtitle
-    subtitle = soup.find("section", {"class": "p-summary"}).text if soup.find("section", {"class": "p-summary"}) else None
+    subtitle = soup.find("section", {"data-field": "subtitle"}).text.strip() if soup.find("section", {"data-field": "subtitle"}) else None
+    # - Description
+    description = soup.find("section", {"data-field": "description"}).text.strip() if soup.find("section", {"data-field": "description"}) else None
 
     # Canonical link
     canonical_link = None
     canonical_link_el = soup.find("a", {"class": "p-canonical"})
     if canonical_link_el is not None:
         canonical_link = canonical_link_el["href"]
+
+    # Use same slugs as Medium, to make sure blog.q42.nl URLs don't break
+    if canonical_link is not None:
+        slug = canonical_link.split('/')[-1]
+    else:
+        slug = slug_from_filename
+
+    # We will delete @q42 account from Medium, so don't use that as canonical URL
+    if canonical_link.startswith("https://medium.com/@q42"):
+        canonical_link = None
 
     # Medium stores every comment as full story.
     # Guess if this post was a comment or a post based on if it has a post title h3 or not.
@@ -82,27 +94,40 @@ def convert_medium_post_to_ghost_json(html_filename, post_html_content):
     mobiledoc_post = parser.convert()
 
     # Download all the story's images to local disk cache folder
+    first_image_of_post = None
+
     for card in mobiledoc_post["cards"]:
         card_type = card[0]
         if card_type == "image":
             data = card[1]
             url = data["src"]
 
-            cache_folder = Path("exported_content") / "downloaded_images" / slug
+            cache_folder = Path(export_folder) / "downloaded_images" / slug_from_filename
             new_image_path = download_image_with_local_cache(url, cache_folder)
+
+            if first_image_of_post is None:
+                first_image_of_post = new_image_path
 
             # TODO: Fix this when Ghost fixes https://github.com/TryGhost/Ghost/issues/9821
             # Ghost 2.0.3 has a bug where it doesn't update imported image paths, so manually add
             # /content/images.
-            final_image_path_for_ghost = str(new_image_path).replace("exported_content", "/content/images")
+            final_image_path_for_ghost = str(new_image_path).replace(str(export_folder), "/content/images")
             data["src"] = final_image_path_for_ghost
 
             # If this image was the story's featured image, grab it.
             # Confusingly, post images ARE updated correctly in 2.0.3, so this path is different
             if "featured_image" in data:
                 del data["featured_image"]
-                feature_image = str(new_image_path).replace("exported_content", "")
+                feature_image = str(new_image_path).replace(str(export_folder), "")
 
+    # Set first image as the story's featured image, if there is no featured image in Medium post.
+    if feature_image is None:
+        feature_image = str(first_image_of_post).replace(str(export_folder), "")
+
+        # If first section is an image, and we used the first image as featured image as well, remove the first image
+        if mobiledoc_post["sections"] and mobiledoc_post["sections"][0] == [10, 0]:
+            print("Removing first card " + str(canonical_link_el["href"]))
+            del mobiledoc_post["sections"][0]
 
     # Create the final post dictionary as required by Ghost 2.0
     return {
@@ -121,8 +146,8 @@ def convert_medium_post_to_ghost_json(html_filename, post_html_content):
         "status": status,
         "locale": None,
         "visibility": "public",
-        "meta_title": None,
-        "meta_description": None,
+        "meta_title": title,
+        "meta_description": description,
         "author_id": "1",
         "created_at": created_at,
         "created_by": "1",

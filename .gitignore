@@ -104,7 +104,8 @@ venv.bak/
 .mypy_cache/
 
 .idea
-exported_content
+exported_content*
 *.zip
 .DS_Store
+.vscode
 
